@@ -5,6 +5,7 @@ import os
 
 import zope.interface
 
+import azure.core.exceptions
 from azure.identity import ClientSecretCredential
 from azure.mgmt.dns import DnsManagementClient
 from azure.mgmt.dns.models import RecordSet, TxtRecord
@@ -20,10 +21,12 @@ logger = logging.getLogger(__name__)
 MSDOCS = 'https://docs.microsoft.com/'
 ACCT_URL = MSDOCS + 'python/azure/python-sdk-azure-authenticate?view=azure-python#mgmt-auth-file'
 AZURE_CLI_URL = MSDOCS + 'cli/azure/install-azure-cli?view=azure-cli-latest'
-AZURE_CLI_COMMAND = ("az ad sp create-for-rbac"
-                     " --name Certbot --sdk-auth --role \"DNS Zone Contributor\""
-                     " --scope /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP_ID"
-                     " > mycredentials.json")
+AZURE_CLI_COMMAND = (
+    "az ad sp create-for-rbac"
+    " --name Certbot --sdk-auth --role \"DNS Zone Contributor\""
+    " --scope /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP_ID"
+    " > mycredentials.json"
+)
 
 
 @zope.interface.implementer(interfaces.IAuthenticator)
@@ -35,8 +38,9 @@ class Authenticator(dns_common.DNSAuthenticator):
     """
 
     description = (
-    'Obtain certificates using a DNS TXT record (if you are using Azure DNS '
-    'for DNS).')
+        'Obtain certificates using a DNS TXT record (if you are using Azure DNS '
+        'for DNS).'
+    )
     ttl = 60
 
     def __init__(self, *args, **kwargs):
@@ -45,9 +49,9 @@ class Authenticator(dns_common.DNSAuthenticator):
 
     @classmethod
     def add_parser_arguments(cls, add):  # pylint: disable=arguments-differ
-        super(Authenticator, cls).add_parser_arguments(add,
-                                                       default_propagation_seconds=60)
-        add('credentials',
+        super(Authenticator, cls).add_parser_arguments(add, default_propagation_seconds=60)
+        add(
+            'credentials',
             help=(
                 'Path to Azure DNS service account JSON file. If you already have a Service ' +
                 'Principal with the required permissions, you can create your own file as per ' +
@@ -55,45 +59,48 @@ class Authenticator(dns_common.DNSAuthenticator):
                 'Otherwise, you can create a new Service Principal using the Azure CLI ' +
                 '(available at {1}) by running "az login" then "{2}"' +
                 'This will create file "mycredentials.json" which you should secure, then ' +
-                'specify with this option or with the AZURE_AUTH_LOCATION environment variable.')
-            .format(ACCT_URL, AZURE_CLI_URL, AZURE_CLI_COMMAND),
-            default=None)
-        add('resource-group',
+                'specify with this option or with the AZURE_AUTH_LOCATION environment variable.'
+            ).format(ACCT_URL, AZURE_CLI_URL, AZURE_CLI_COMMAND),
+            default=None
+        )
+        add(
+            'resource-group',
             help=('Resource Group in which the DNS zone is located'),
-            default=None)
+            default=None
+        )
 
     def more_info(self):  # pylint: disable=missing-docstring,no-self-use
-        return 'This plugin configures a DNS TXT record to respond to a dns-01 challenge using ' + \
-               'the Azure DNS API.'
+        return (
+            'This plugin configures a DNS TXT record to respond to a dns-01 challenge using '
+            'the Azure DNS API.'
+        )
 
     def _setup_credentials(self):
         if self.conf('resource-group') is None:
-            raise errors.PluginError('Please specify a resource group using '
-                                     '--dns-azure-resource-group <RESOURCEGROUP>')
+            raise errors.PluginError(
+                'Please specify a resource group using '
+                '--dns-azure-resource-group <RESOURCEGROUP>'
+            )
 
-        if self.conf(
-                'credentials') is None and 'AZURE_AUTH_LOCATION' not in os.environ:
+        if self.conf('credentials') is None and 'AZURE_AUTH_LOCATION' not in os.environ:
             raise errors.PluginError(
                 'Please specify credentials file using the '
                 'AZURE_AUTH_LOCATION environment variable or '
-                'using --dns-azure-credentials <file>')
+                'using --dns-azure-credentials <file>'
+            )
         else:
-            self._configure_file('credentials',
-                                 'path to Azure DNS service account JSON file')
+            self._configure_file('credentials','path to Azure DNS service account JSON file')
 
             dns_common.validate_file_permissions(self.conf('credentials'))
 
     def _perform(self, domain, validation_name, validation):
-        self._get_azure_client().add_txt_record(validation_name,
-                                                validation,
-                                                self.ttl)
+        self._get_azure_client().add_txt_record(validation_name, validation, self.ttl)
 
     def _cleanup(self, domain, validation_name, validation):
-        self._get_azure_client().del_txt_record(validation_name)
+        self._get_azure_client().del_txt_record(validation_name, validation)
 
     def _get_azure_client(self):
-        return _AzureClient(self.conf('resource-group'),
-                            self.conf('credentials'))
+        return _AzureClient(self.conf('resource-group'), self.conf('credentials'))
 
 
 class _AzureClient(object):
@@ -101,7 +108,7 @@ class _AzureClient(object):
     Encapsulates all communication with the Azure Cloud DNS API.
     """
 
-    def __init__(self, resource_group, account_json=None):
+    def __init__(self, resource_group, auth_path=None):
         self.resource_group = resource_group
 
         with open(auth_path, 'r') as f:
@@ -129,21 +136,27 @@ class _AzureClient(object):
         :raises certbot.errors.PluginError: if an error occurs communicating with the Azure API
         """
         try:
-            record = RecordSet(ttl=record_ttl,
-                               txt_records=[TxtRecord(value=[record_content])])
             zone = self._find_managed_zone(domain)
-            relative_record_name = ".".join(
-                domain.split('.')[0:-len(zone.split('.'))])
-            self.dns_client.record_sets.create_or_update(self.resource_group,
-                                                         zone,
-                                                         relative_record_name,
-                                                         'TXT',
-                                                         record)
+            relative_record_name = ".".join(domain.split('.')[0:-len(zone.split('.'))])
+
+            try:
+                record = self.dns_client.record_sets.get(self.resource_group, zone, relative_record_name, 'TXT')
+                record.txt_records.append(TxtRecord(value=[record_content]))
+            except azure.core.exceptions.ResourceNotFoundError:
+                record = RecordSet(ttl=record_ttl, txt_records=[TxtRecord(value=[record_content])])
+
+            self.dns_client.record_sets.create_or_update(
+                self.resource_group,
+                zone,
+                relative_record_name,
+                'TXT',
+                record
+            )
         except CloudError as e:
             logger.error('Encountered error adding TXT record: %s', e)
             raise errors.PluginError('Error communicating with the Azure DNS API: {0}'.format(e))
 
-    def del_txt_record(self, domain):
+    def del_txt_record(self, domain, record_content):
         """
         Delete a TXT record using the supplied information.
 
@@ -153,12 +166,29 @@ class _AzureClient(object):
 
         try:
             zone = self._find_managed_zone(domain)
-            relative_record_name = ".".join(
-                domain.split('.')[0:-len(zone.split('.'))])
-            self.dns_client.record_sets.delete(self.resource_group,
-                                               zone,
-                                               relative_record_name,
-                                               'TXT')
+            relative_record_name = ".".join(domain.split('.')[0:-len(zone.split('.'))])
+
+            try:
+                record = self.dns_client.record_sets.get(self.resource_group, zone, relative_record_name, 'TXT')
+                record.txt_records = [tr for tr in record.txt_records if tr.value != [record_content]]
+            except azure.core.exceptions.ResourceNotFoundError:
+                return
+
+            if not record.txt_records:
+                self.dns_client.record_sets.delete(
+                    self.resource_group,
+                    zone,
+                    relative_record_name,
+                    'TXT'
+                )
+            else:
+                self.dns_client.record_sets.create_or_update(
+                    self.resource_group,
+                    zone,
+                    relative_record_name,
+                    'TXT',
+                    record
+                )
         except (CloudError, errors.PluginError) as e:
             logger.warning('Encountered error deleting TXT record: %s', e)
 
@@ -191,4 +221,5 @@ class _AzureClient(object):
 
         raise errors.PluginError(
             'Unable to determine managed zone for {0} using zone names: {1}.'
-            .format(domain, zone_dns_name_guesses))
+            .format(domain, zone_dns_name_guesses)
+        )
