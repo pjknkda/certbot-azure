@@ -8,6 +8,7 @@ version = '0.1.0'
 install_requires = [
     'acme>=0.29.0',
     'certbot>=1.1.0',
+    'azure-identity',
     'azure-mgmt-resource',
     'azure-mgmt-network',
     'azure-mgmt-dns>=3.0.0',
