@@ -12,6 +12,7 @@ install_requires = [
     'azure-mgmt-resource',
     'azure-mgmt-network',
     'azure-mgmt-dns>=3.0.0',
+    'msrestazure',
     'PyOpenSSL>=19.1.0',
     'setuptools',  # pkg_resources
     'zope.interface'
